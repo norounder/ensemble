@@ -20,6 +20,10 @@ Thumbs.db
 *.swo
 *~
 
+# Editor / IDE markers
+# Local Claude Code / Codex IDE marker file (zero-byte sentinel)
+.codex
+
 # Runtime data
 *.log
 /tmp/
