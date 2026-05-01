@@ -36,19 +36,42 @@ setInterval(() => {
   }
 }, 60_000)
 
+/**
+ * Normalize an origin string into its canonical `protocol//host[:port]` form.
+ * Returns null when the value cannot be parsed as a URL — used to reject
+ * malformed configured entries at startup and to safely compare incoming
+ * `Origin` headers without falling back to substring/case-sensitive matching.
+ */
+function normalizeOrigin(value: string): string | null {
+  try {
+    return new URL(value).origin.toLowerCase()
+  } catch {
+    return null
+  }
+}
+
 function getAllowedCorsOrigins(): string[] {
   const configured = process.env.ENSEMBLE_CORS_ORIGIN?.trim()
   if (!configured) return []
 
-  return configured
-    .split(',')
-    .map(origin => origin.trim())
-    .filter(Boolean)
+  const normalized: string[] = []
+  for (const raw of configured.split(',').map(o => o.trim()).filter(Boolean)) {
+    const canonical = normalizeOrigin(raw)
+    if (canonical) {
+      normalized.push(canonical)
+    } else {
+      console.warn(`[Ensemble] Ignoring malformed ENSEMBLE_CORS_ORIGIN entry: ${raw}`)
+    }
+  }
+  return normalized
 }
 
 function isAllowedOrigin(origin: string): boolean {
+  const incoming = normalizeOrigin(origin)
+  if (!incoming) return false
+
   const configuredOrigins = getAllowedCorsOrigins()
-  if (configuredOrigins.length > 0) return configuredOrigins.includes(origin)
+  if (configuredOrigins.length > 0) return configuredOrigins.includes(incoming)
   return DEFAULT_CORS_ORIGIN_PATTERNS.some(pattern => pattern.test(origin))
 }
 
@@ -58,6 +81,8 @@ function buildCorsHeaders(origin?: string): Record<string, string> {
     'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Vary': 'Origin',
+    // Defense-in-depth: prevent MIME sniffing on every response.
+    'X-Content-Type-Options': 'nosniff',
   }
 
   if (origin && isAllowedOrigin(origin)) {
@@ -81,11 +106,24 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
   })
 }
 
+/**
+ * Resolve the effective client IP for rate limiting.
+ *
+ * `X-Forwarded-For` is only honored when ENSEMBLE_TRUST_PROXY is explicitly
+ * set to '1' or 'true'. Otherwise we ignore the header entirely and use the
+ * raw socket address — preventing trivial rate-limit bypass via spoofed XFF
+ * headers when the server is exposed directly (the default).
+ */
 function getClientIp(req: http.IncomingMessage): string {
-  const forwardedFor = req.headers['x-forwarded-for']
-  if (typeof forwardedFor === 'string') {
-    const firstIp = forwardedFor.split(',')[0]?.trim()
-    if (firstIp) return firstIp
+  const trustProxy = process.env.ENSEMBLE_TRUST_PROXY === '1'
+    || process.env.ENSEMBLE_TRUST_PROXY === 'true'
+
+  if (trustProxy) {
+    const forwardedFor = req.headers['x-forwarded-for']
+    if (typeof forwardedFor === 'string') {
+      const firstIp = forwardedFor.split(',')[0]?.trim()
+      if (firstIp) return firstIp
+    }
   }
 
   return req.socket.remoteAddress || 'unknown'
