@@ -226,6 +226,20 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true })
   })
 
+  // Generates `count` neutral agent messages with timestamps that precede the
+  // standard test timeline (12:02:30+) so they never become the last
+  // non-ensemble message. Used to satisfy the MIN_MESSAGES_BEFORE_AUTO_DISBAND
+  // ramp-up guard added in c8c14dc without affecting per-test idle/completion
+  // logic. Content avoids any COMPLETION_PATTERNS match.
+  function fillerMessages(count: number): EnsembleMessage[] {
+    return Array.from({ length: count }, (_, i) => makeMessage({
+      from: i % 2 === 0 ? 'codex-1' : 'claude-2',
+      teamId: 'team-1',
+      content: 'Working on it',
+      timestamp: new Date(Date.UTC(2026, 2, 18, 11, 0, i)).toISOString(),
+    }))
+  }
+
   async function setupServiceWithMocks(team: EnsembleTeam, messages: EnsembleMessage[]) {
     const appendedMessages: EnsembleMessage[] = []
     vi.doMock('../lib/ensemble-registry', () => ({
@@ -269,6 +283,8 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('auto-disbands when two different agents send completion signals within 60s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
+      // 8 ramp-up messages to clear MIN_MESSAGES_BEFORE_AUTO_DISBAND guard
+      ...fillerMessages(8),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T12:04:20.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Alles afgerond', timestamp: '2026-03-18T12:04:50.000Z' }),
     ]
@@ -295,6 +311,8 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
   it('auto-disbands when one completion signal exists and team is idle for more than 120s', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
+      // 8 ramp-up messages to clear MIN_MESSAGES_BEFORE_AUTO_DISBAND guard
+      ...fillerMessages(8),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T12:02:30.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still investigating', timestamp: '2026-03-18T12:02:40.000Z' }),
     ]
@@ -366,9 +384,31 @@ describe('shouldAutoDisband() — tested via checkIdleTeams()', () => {
     expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
   })
 
+  it('does NOT auto-disband while team is still ramping up (fewer than MIN_MESSAGES_BEFORE_AUTO_DISBAND non-ensemble messages)', async () => {
+    // Encodes the c8c14dc guard: do not auto-disband teams that have exchanged
+    // < MIN_MESSAGES_BEFORE_AUTO_DISBAND messages, even when both agents have
+    // signaled completion within the recent window. Prevents the production
+    // regression where teams ended after ~13 messages / 2 minutes before doing
+    // real work.
+    const team = makeTeam()
+    const messages: EnsembleMessage[] = [
+      ...fillerMessages(7), // 7 ramp-up messages — total stays under the guard
+      makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Task is done', timestamp: '2026-03-18T12:04:20.000Z' }),
+      makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Alles afgerond', timestamp: '2026-03-18T12:04:50.000Z' }),
+    ]
+    // 9 non-ensemble messages — one short of the guard's threshold
+
+    const { mod, appendedMessages } = await setupServiceWithMocks(team, messages)
+    await mod.checkIdleTeams()
+
+    expect(appendedMessages.some(m => m.content.includes('Auto-disband'))).toBe(false)
+  })
+
   it('ignores ensemble messages when determining idle time', async () => {
     const team = makeTeam()
     const messages: EnsembleMessage[] = [
+      // 8 ramp-up messages to clear MIN_MESSAGES_BEFORE_AUTO_DISBAND guard
+      ...fillerMessages(8),
       makeMessage({ from: 'codex-1', teamId: 'team-1', content: 'Done', timestamp: '2026-03-18T12:02:30.000Z' }),
       makeMessage({ from: 'claude-2', teamId: 'team-1', content: 'Still working', timestamp: '2026-03-18T12:02:35.000Z' }),
       makeMessage({ from: 'ensemble', teamId: 'team-1', content: 'Agent joined', timestamp: '2026-03-18T12:04:55.000Z' }),
