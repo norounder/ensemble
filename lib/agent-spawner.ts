@@ -4,10 +4,19 @@
  * Handles: tmux session creation, program launching, and session cleanup.
  */
 
+import os from 'os'
+import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import { getRuntime } from './agent-runtime'
 import { getSelfHostId } from './hosts-config'
 import { buildAgentCommand } from './agent-config'
+import { collabRuntimeDir } from './collab-paths'
+import {
+  classifyEnv,
+  writeSecretEnvFile,
+  buildSafeExports,
+  buildSecretEnvLoader,
+} from './secret-env'
 
 export interface SpawnedAgent {
   id: string
@@ -23,6 +32,21 @@ interface SpawnAgentOptions {
   program: string
   workingDirectory: string
   hostId?: string
+  /** Optional team id; used to place the per-agent secret envfile under the team runtime dir. */
+  teamId?: string
+}
+
+/**
+ * Resolve the directory that holds an agent's private envfile.
+ * Prefers the team runtime dir (already mode 0700-ish under /tmp/ensemble),
+ * falls back to a unique subdir of os.tmpdir() when no teamId is provided.
+ */
+function agentSecretDir(teamId: string | undefined, agentName: string): string {
+  const safeAgent = agentName.replace(/[^a-zA-Z0-9\-_.]/g, '_') || 'agent'
+  if (teamId && /^[a-zA-Z0-9\-_.]+$/.test(teamId)) {
+    return path.join(collabRuntimeDir(teamId), 'agents', safeAgent)
+  }
+  return path.join(os.tmpdir(), `ensemble-spawn-${uuidv4()}`)
 }
 
 /** Compute tmux session name from agent name */
@@ -54,13 +78,34 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
   // Start the AI program
   const startCommand = resolveStartCommand(options.program)
 
-  // Forward ENSEMBLE_* and agent-specific env vars to tmux session
-  const envForward = Object.entries(process.env)
+  // Forward ENSEMBLE_, ANTHROPIC_, OPENAI_, and NVIDIA_ prefixed env vars to the agent.
+  // Secret values (matching KEY/TOKEN/SECRET/PASSWORD/API_KEY) are written
+  // to a private envfile and sourced by the spawn shell, so they never appear
+  // in the tmux command line, pane scrollback, or replay HTML.
+  const forwarded = Object.entries(process.env)
     .filter(([k]) => k.startsWith('ENSEMBLE_') || k.startsWith('NVIDIA_') || k.startsWith('OPENAI_') || k.startsWith('ANTHROPIC_'))
-    .filter(([, v]) => v)
-    .map(([k, v]) => `export ${k}="${v}"`)
-    .join('; ')
-  const envPrefix = envForward ? `${envForward}; ` : ''
+  const { safe, secret } = classifyEnv(forwarded)
+
+  let secretLoader = ''
+  if (secret.length > 0) {
+    try {
+      const secretDir = agentSecretDir(options.teamId, options.name)
+      const envFile = path.join(secretDir, '.env')
+      writeSecretEnvFile(envFile, secret)
+      secretLoader = buildSecretEnvLoader(envFile)
+    } catch (err) {
+      // Don't crash the spawn if we can't write the file; just skip secret
+      // forwarding so values remain redacted (the agent will see fewer env
+      // vars but won't leak secrets to the pane).
+      console.error(`[Spawner] Failed to write secret envfile for ${options.name}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const safeExports = buildSafeExports(safe)
+  const envPrefixParts: string[] = []
+  if (secretLoader) envPrefixParts.push(secretLoader)
+  if (safeExports) envPrefixParts.push(`${safeExports};`)
+  const envPrefix = envPrefixParts.length > 0 ? `${envPrefixParts.join(' ')} ` : ''
 
   // Use 'nocorrect' to prevent zsh auto-correct prompt, and add leading space to avoid tmux swallowing first char
   await runtime.sendKeys(sessionName, ` nocorrect unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
