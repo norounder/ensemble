@@ -9,9 +9,9 @@
  *   ensemble monitor                   # Interactive team picker
  */
 
-import http from 'http'
 import readline from 'readline'
 import { resolveAgentProgram } from '../lib/agent-config'
+import { createApiClient } from '../lib/http-client'
 
 // ─────────────────────────── ANSI ESCAPE CODES ───────────────────────────
 
@@ -102,41 +102,9 @@ function getAgentStyle(name: string): AgentStyle {
 
 const API_BASE = process.env.ENSEMBLE_URL || 'http://localhost:23000'
 
-function apiGet<T>(path: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const url = new URL(path, API_BASE)
-    http.get(url.toString(), { timeout: 5000 }, (res) => {
-      let data = ''
-      res.on('data', chunk => data += chunk)
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)) }
-        catch (e) { reject(e) }
-      })
-    }).on('error', reject)
-  })
-}
-
-function apiPost<T>(path: string, body: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const url = new URL(path, API_BASE)
-    const payload = JSON.stringify(body)
-    const req = http.request(url.toString(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-      timeout: 5000,
-    }, (res) => {
-      let data = ''
-      res.on('data', chunk => data += chunk)
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)) }
-        catch (e) { reject(e) }
-      })
-    })
-    req.on('error', reject)
-    req.write(payload)
-    req.end()
-  })
-}
+const httpClient = createApiClient({ timeoutMs: 5000 })
+const apiGet = <T>(path: string): Promise<T> => httpClient.get<T>(path)
+const apiPost = <T>(path: string, body: unknown): Promise<T> => httpClient.post<T>(path, body)
 
 // ─────────────────────────── TYPES ───────────────────────────────────────
 
