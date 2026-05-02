@@ -62,8 +62,13 @@ export async function spawnLocalAgent(options: SpawnAgentOptions): Promise<Spawn
     .join('; ')
   const envPrefix = envForward ? `${envForward}; ` : ''
 
-  // Use 'nocorrect' to prevent zsh auto-correct prompt, and add leading space to avoid tmux swallowing first char
-  await runtime.sendKeys(sessionName, ` nocorrect unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
+  // Leading space avoids tmux swallowing the first character. Original `nocorrect` prefix
+  // was zsh-only (used to suppress its auto-correct prompt). Under bash, `nocorrect` is
+  // not a builtin, so `nocorrect unset CLAUDECODE` is parsed as command `nocorrect` with
+  // args `unset CLAUDECODE` — both `nocorrect` and the intended `unset` silently fail to
+  // run their effect (only stderr `nocorrect: command not found` is produced). Drop it
+  // for shell portability so `unset CLAUDECODE` actually runs.
+  await runtime.sendKeys(sessionName, ` unset CLAUDECODE; ${envPrefix}${startCommand}`, { literal: true, enter: true })
 
   console.log(`[Spawner] Agent ${options.name} started in tmux session ${sessionName}`)
 
